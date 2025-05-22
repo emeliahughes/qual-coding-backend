@@ -51,18 +51,14 @@ backend/
 git clone https://github.com/your-username/your-repo.git
 cd your-repo/backend
 
-2. Create a virtual environment and install dependencies
-bash
-Copy
-Edit
+### 2. Create a virtual environment and install dependencies
+
 python3 -m venv venv
 source venv/bin/activate         # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-3. Create database and tables
-bash
-Copy
-Edit
+### 3. Create database and tables
+
 mkdir -p data
 export FLASK_APP=app.py          # Windows: set FLASK_APP=app.py
 flask shell
@@ -70,11 +66,15 @@ flask shell
 >>> db.create_all()
 >>> exit()
 
-🧪 Running the Server
+---
+
+## 🧪 Running the Server
 flask run
 Server will be available at http://localhost:5000
 
-🔌 Key Endpoints
+---
+
+## 🔌 Key Endpoints
 Projects
 POST /api/projects — Create a new project
 
@@ -96,18 +96,20 @@ POST /api/save-progress — Autosaves tags/notes as draft
 
 POST /api/submit — Finalizes a result and advances index
 
-📋 Notes
+---
+
+## 📋 Notes
 CSV files must be placed in /data and referenced by name when creating a project
 
 Coder progress (progress_index) is tracked per coder and auto-incremented on submission
 
 All tag/response data is stored in the results table and can be exported per project
 
-✅ TODO / Future Features
- File upload endpoint for TikTok CSVs
+---
 
- CSV download of all submitted results
+## ✅ TODO / Future Features
 
- Admin dashboard stats route
-
- Optional authentication
+- File upload endpoint for TikTok CSVs
+- CSV download of all submitted results
+- Admin dashboard stats route
+- Optional authentication
