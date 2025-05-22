@@ -50,55 +50,58 @@ backend/
 ```bash
 git clone https://github.com/your-username/your-repo.git
 cd your-repo/backend
+```
 
 ### 2. Create a virtual environment and install dependencies
 
+```
 python3 -m venv venv
 source venv/bin/activate         # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
+```
 
 ### 3. Create database and tables
 
+```
 mkdir -p data
 export FLASK_APP=app.py          # Windows: set FLASK_APP=app.py
 flask shell
 >>> from app import db
 >>> db.create_all()
 >>> exit()
+```
 
 ---
 
 ## 🧪 Running the Server
+
+```
 flask run
 Server will be available at http://localhost:5000
+```
 
 ---
 
 ## 🔌 Key Endpoints
 Projects
-POST /api/projects — Create a new project
-
-GET /api/project-info?project=slug — Get project metadata
+- POST /api/projects — Create a new project
+- GET /api/project-info?project=slug — Get project metadata
 
 CSV Data
-(Planned) POST /api/upload-data — Upload TikTok dataset CSV
-
-(Planned) GET /api/download-results?project=slug — Export results as CSV
+- (Planned) POST /api/upload-data — Upload TikTok dataset CSV
+- (Planned) GET /api/download-results?project=slug — Export results as CSV
 
 Coding Workflow
-GET /api/next-video?project=slug&coder=name
-
-GET /api/previous-video?project=slug&coder=name
-
-GET /api/video-at-index?project=slug&coder=name&index=3
-
-POST /api/save-progress — Autosaves tags/notes as draft
-
-POST /api/submit — Finalizes a result and advances index
+- GET /api/next-video?project=slug&coder=name
+- GET /api/previous-video?project=slug&coder=name
+- GET /api/video-at-index?project=slug&coder=name&index=3
+- POST /api/save-progress — Autosaves tags/notes as draft
+- POST /api/submit — Finalizes a result and advances index
 
 ---
 
 ## 📋 Notes
+
 CSV files must be placed in /data and referenced by name when creating a project
 
 Coder progress (progress_index) is tracked per coder and auto-incremented on submission
