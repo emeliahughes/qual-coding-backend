@@ -88,8 +88,8 @@ Projects
 - GET /api/project-info?project=slug — Get project metadata
 
 CSV Data
-- (Planned) POST /api/upload-data — Upload TikTok dataset CSV
-- (Planned) GET /api/download-results?project=slug — Export results as CSV
+- POST /api/upload-data — Upload TikTok dataset CSV
+- GET /api/download-results?project=slug — Export results as CSV
 
 Coding Workflow
 - GET /api/next-video?project=slug&coder=name
@@ -112,7 +112,7 @@ All tag/response data is stored in the results table and can be exported per pro
 
 ## ✅ TODO / Future Features
 
-- File upload endpoint for TikTok CSVs
-- CSV download of all submitted results
-- Admin dashboard stats route
-- Optional authentication
+- [x] File upload endpoint for TikTok CSVs
+- [x] CSV download of all submitted results
+- [ ] Admin dashboard stats route
+- [ ] Optional authentication
