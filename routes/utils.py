@@ -75,6 +75,56 @@ def generate_results_csv(slug):
         }
     )
 
+def get_results_csv_text(slug):
+    """Get results CSV as text for the Results page"""
+    project = Project.query.filter_by(slug=slug).first()
+    if not project:
+        return None
+
+    results = Result.query.filter_by(project_id=project.id).all()
+    if not results:
+        return None
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Write CSV headers
+    writer.writerow(["coder", "video_id", "status", "timestamp", "notes", "categories"])
+    
+    for r in results:
+        # Determine the actual status
+        if r.excluded:
+            actual_status = "excluded"
+        elif r.status == "submitted":
+            actual_status = "submitted"
+        else:
+            actual_status = "saved"  # draft status
+        
+        # Parse categories for better readability
+        categories_display = ""
+        if r.categories and not r.excluded:
+            try:
+                categories_data = json.loads(r.categories)
+                category_pairs = []
+                for category, tags in categories_data.items():
+                    if tags:
+                        category_pairs.append(f"{category}: {', '.join(tags)}")
+                categories_display = "; ".join(category_pairs)
+            except json.JSONDecodeError:
+                categories_display = r.categories
+        
+        writer.writerow([
+            r.coder.name,
+            r.video_id,
+            actual_status,
+            r.timestamp.isoformat() if r.timestamp else "",
+            r.notes or "",
+            categories_display
+        ])
+
+    output.seek(0)
+    return output.getvalue()
+
 # Optional placeholder
 def load_project_csv(filepath):
     pass

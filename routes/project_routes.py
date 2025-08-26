@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, send_file
 from models import db, Project, Coder, Result, ProjectFile
 from sqlalchemy.exc import IntegrityError
-from routes.utils import generate_codebook_json, generate_results_csv
+from routes.utils import generate_codebook_json, generate_results_csv, get_results_csv_text
 from werkzeug.utils import secure_filename
 import os, json, csv
 
@@ -60,7 +60,20 @@ def list_projects():
     projects = Project.query.all()
     result = []
     for p in projects:
-        refresh_video_count(p)  # ✅ sync DB, discard return value
+        # Calculate video count from actual results in database
+        unique_videos = set()
+        for coder in p.coders:
+            for db_result in coder.results:
+                unique_videos.add(db_result.video_id)
+        
+        # If we have results but no video_count, use the count from results
+        if unique_videos and p.video_count == 0:
+            p.video_count = len(unique_videos)
+            db.session.commit()
+        elif not unique_videos:
+            # If no results exist, always refresh from CSV files to get accurate count
+            refresh_video_count(p)
+        
         coders = [c.name for c in p.coders]
         responses = {}
         for c in p.coders:
@@ -80,7 +93,7 @@ def list_projects():
             "name": p.name,
             "slug": p.slug,
             "coders": coders,
-            "video_count": p.video_count,  # ✅ just the number
+            "video_count": p.video_count,
             "responses": responses,
             "project_files": file_names
         })
@@ -251,7 +264,15 @@ def download_codebook():
 @project_bp.route("/api/download-results", methods=["GET"])
 def download_results():
     slug = request.args.get("project")
-    return generate_results_csv(slug)
+    format_type = request.args.get("format", "download")
+    
+    if format_type == "text":
+        csv_text = get_results_csv_text(slug)
+        if csv_text is None:
+            return jsonify({"error": "No results found"}), 404
+        return csv_text
+    else:
+        return generate_results_csv(slug)
 
 @project_bp.route("/api/coder", methods=["POST"])
 def add_coder():
