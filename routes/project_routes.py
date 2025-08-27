@@ -53,7 +53,18 @@ def create_project():
         db.session.add(Coder(name=coder, project_id=project.id))
 
     db.session.commit()
-    return jsonify({"success": True, "slug": project.slug})
+    
+    # Return the complete project data for immediate frontend update
+    coders = [c.name for c in project.coders]
+    result = {
+        "name": project.name,
+        "slug": project.slug,
+        "coders": coders,
+        "video_count": project.video_count,
+        "responses": {},
+        "project_files": []
+    }
+    return jsonify(result)
 
 @project_bp.route("/api/projects", methods=["GET"])
 def list_projects():
@@ -193,7 +204,32 @@ def update_project(slug):
     updated_count = update_results_for_codebook_changes(project, old_codebook, project.codebook)
     
     db.session.commit()
-    return jsonify({"success": True, "updated_results": updated_count})
+    
+    # Return the complete updated project data
+    coders = [c.name for c in project.coders]
+    responses = {}
+    for c in project.coders:
+        responses[c.name] = []
+        for r in c.results:
+            if r.excluded:
+                responses[c.name].append({"video_id": r.video_id, "excluded": True})
+            else:
+                responses[c.name].append({
+                    "video_id": r.video_id, 
+                    "status": r.status,
+                    "excluded": False
+                })
+    
+    file_names = [f.filename for f in project.project_files]
+    result = {
+        "name": project.name,
+        "slug": project.slug,
+        "coders": coders,
+        "video_count": project.video_count,
+        "responses": responses,
+        "project_files": file_names
+    }
+    return jsonify(result)
 
 @project_bp.route("/api/project/<slug>", methods=["DELETE"])
 def delete_project(slug):
