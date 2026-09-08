@@ -1,11 +1,34 @@
 from flask import Blueprint, request, jsonify, send_file, current_app
-from models import db, Project, Coder, Result, ProjectFile
+from models import db, Project, Coder, Result, ProjectFile, ProjectMembership
 from sqlalchemy.exc import IntegrityError
 from routes.utils import generate_codebook_json, generate_results_csv, get_results_csv_text
 from werkzeug.utils import secure_filename
 import os, json, csv
+from routes.auth import (
+    admin_required,
+    can_access_project,
+    can_manage_project,
+    current_user,
+    membership_for,
+    require_authenticated,
+)
 
 project_bp = Blueprint('project', __name__)
+
+
+@project_bp.before_request
+def require_project_authentication():
+    return require_authenticated()
+
+
+def access_fields(project):
+    user = current_user()
+    membership = membership_for(user, project) if not user.is_admin else None
+    return {
+        "can_manage": can_manage_project(user, project),
+        "assigned_coder": membership.coder.name if membership and membership.coder else None,
+        "project_role": "administrator" if user.is_admin else membership.role,
+    }
 
 def load_video_list(project):
     UPLOAD_ROOT = os.environ.get(
@@ -35,6 +58,7 @@ def refresh_video_count(project):
     return videos
 
 @project_bp.route("/projects", methods=["POST"])
+@admin_required
 def create_project():
     data = request.get_json()
     name = data.get("name")
@@ -68,11 +92,20 @@ def create_project():
         "responses": {},
         "project_files": []
     }
+    result.update(access_fields(project))
     return jsonify(result)
 
 @project_bp.route("/projects", methods=["GET"])
 def list_projects():
-    projects = Project.query.all()
+    user = current_user()
+    if user.is_admin:
+        projects = Project.query.all()
+    else:
+        projects = (
+            Project.query.join(ProjectMembership)
+            .filter(ProjectMembership.user_id == user.id)
+            .all()
+        )
     result = []
     for p in projects:
         try:
@@ -99,14 +132,16 @@ def list_projects():
                         "excluded": False
                     })
         file_names = [f.original_name for f in p.project_files]
-        result.append({
+        project_payload = {
             "name": p.name,
             "slug": p.slug,
             "coders": coders,
             "video_count": p.video_count,
             "responses": responses,
             "project_files": file_names
-        })
+        }
+        project_payload.update(access_fields(p))
+        result.append(project_payload)
     return jsonify(result)
 
 
@@ -192,6 +227,8 @@ def update_project(slug):
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
 
     data = request.get_json()
     old_codebook = project.codebook
@@ -228,6 +265,7 @@ def update_project(slug):
         "responses": responses,
         "project_files": file_names
     }
+    result.update(access_fields(project))
     return jsonify(result)
 
 import shutil
@@ -238,6 +276,8 @@ def delete_project(slug):
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
 
     # remove files on disk (if you keep per-project files)
     try:
@@ -250,6 +290,7 @@ def delete_project(slug):
         return jsonify(error="Failed to remove project files", detail=str(e)), 500
 
     try:
+        ProjectMembership.query.filter_by(project_id=project.id).delete(synchronize_session=False)
         Result.query.filter_by(project_id=project.id).delete(synchronize_session=False)
         Coder.query.filter_by(project_id=project.id).delete(synchronize_session=False)
         ProjectFile.query.filter_by(project_id=project.id).delete(synchronize_session=False)
@@ -271,15 +312,19 @@ def project_info():
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Not found"}), 404
+    if not can_access_project(current_user(), project):
+        return jsonify({"error": "Project access required"}), 403
     coders = [c.name for c in project.coders]
     file_names = [f.original_name for f in project.project_files]
-    return jsonify({
+    payload = {
         "name": project.name,
         "slug": slug,
         "coders": coders,
         "codebook": json.loads(project.codebook or "[]"),
         "project_files": file_names
-    })
+    }
+    payload.update(access_fields(project))
+    return jsonify(payload)
 
 from werkzeug.utils import secure_filename
 
@@ -295,6 +340,8 @@ def upload_data():
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
 
     upload_folder = os.path.join(UPLOAD_ROOT, slug)
     try:
@@ -340,11 +387,21 @@ def upload_data():
 @project_bp.route("/download-codebook", methods=["GET"])
 def download_codebook():
     slug = request.args.get("project")
+    project = Project.query.filter_by(slug=slug).first()
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    if not can_access_project(current_user(), project):
+        return jsonify({"error": "Project access required"}), 403
     return generate_codebook_json(slug)
 
 @project_bp.route("/download-results", methods=["GET"])
 def download_results():
     slug = request.args.get("project")
+    project = Project.query.filter_by(slug=slug).first()
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    if not can_access_project(current_user(), project):
+        return jsonify({"error": "Project access required"}), 403
     format_type = request.args.get("format", "download")
     
     if format_type == "text":
@@ -361,6 +418,8 @@ def add_coder():
     project = Project.query.filter_by(slug=data.get("project")).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
     
     coder_name = data.get("coder", "").strip()
     if not coder_name:
@@ -384,6 +443,10 @@ def add_coder():
 def rename_coder():
     data = request.get_json()
     project = Project.query.filter_by(slug=data.get("project")).first()
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
     coder = Coder.query.filter_by(name=data.get("old_name"), project_id=project.id).first()
     if not coder:
         return jsonify({"error": "Coder not found"}), 404
@@ -397,6 +460,8 @@ def delete_coder():
     project = Project.query.filter_by(slug=data.get("project")).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
     
     coder_name = data.get("coder", "").strip()
     if not coder_name:
@@ -405,6 +470,8 @@ def delete_coder():
     coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
     if not coder:
         return jsonify({"error": "Coder not found"}), 404
+    if ProjectMembership.query.filter_by(coder_id=coder.id).first():
+        return jsonify({"error": "Remove this coder from researcher account assignments before deleting it"}), 409
     
     try:
         db.session.delete(coder)

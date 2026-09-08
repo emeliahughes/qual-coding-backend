@@ -4,8 +4,20 @@ from datetime import datetime
 import json
 import os
 import csv
+from routes.auth import (
+    can_access_project,
+    can_code_as,
+    can_manage_project,
+    current_user,
+    require_authenticated,
+)
 
 coding_bp = Blueprint('coding', __name__)
+
+
+@coding_bp.before_request
+def require_coding_authentication():
+    return require_authenticated()
 
 UPLOAD_ROOT = os.environ.get(
     "UPLOAD_ROOT",
@@ -69,10 +81,14 @@ def video_at_index():
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_access_project(current_user(), project):
+        return jsonify({"error": "Project access required"}), 403
 
     coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first() if coder_name else None
     if not coder and coder_name:
         return jsonify({"error": "Coder not found"}), 404
+    if coder and not can_code_as(current_user(), project, coder):
+        return jsonify({"error": "You are not authorized to code as this coder"}), 403
 
     videos = load_video_list(project)
     
@@ -175,9 +191,13 @@ def save_progress():
     notes = response.get("notes", "")
 
     project = Project.query.filter_by(slug=slug).first()
-    coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
-    if not project or not coder:
+    if not project:
         return jsonify({"error": "Project or Coder not found"}), 404
+    coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
+    if not coder:
+        return jsonify({"error": "Project or Coder not found"}), 404
+    if not can_code_as(current_user(), project, coder):
+        return jsonify({"error": "You are not authorized to code as this coder"}), 403
 
     result = Result.query.filter_by(
         project_id=project.id,
@@ -235,9 +255,13 @@ def submit():
         return jsonify({"error": "At least one tag must be selected, or the video must be marked as excluded."}), 400
 
     project = Project.query.filter_by(slug=slug).first()
-    coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
-    if not project or not coder:
+    if not project:
         return jsonify({"error": "Project or Coder not found"}), 404
+    coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
+    if not coder:
+        return jsonify({"error": "Project or Coder not found"}), 404
+    if not can_code_as(current_user(), project, coder):
+        return jsonify({"error": "You are not authorized to code as this coder"}), 403
 
     # Update existing record instead of delete+create to avoid race conditions
     result = Result.query.filter_by(
@@ -289,6 +313,8 @@ def update_codebook():
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
+    if not can_manage_project(current_user(), project):
+        return jsonify({"error": "Project administrator access required"}), 403
 
     try:
         codebook = json.loads(project.codebook or "[]")

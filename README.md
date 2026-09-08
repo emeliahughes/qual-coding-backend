@@ -12,6 +12,8 @@ This is the backend API for a qualitative coding platform designed for tagging a
 - Autosave tag and note drafts per video
 - Submit finalized coding responses
 - Resume incomplete work (draft recovery)
+- Restrict projects to individually authorized researcher accounts
+- Bind researcher accounts to approved project and coder identities
 - Navigate to next/previous/specific videos
 - **NEW:** Export coded data to CSV format
 - **NEW:** Comprehensive project management
@@ -76,6 +78,8 @@ flask shell
 >>> exit()
 ```
 
+For a private deployment, create the authentication tables and first administrator using the instructions in `AUTH_DEPLOYMENT.md`.
+
 ### 4. Run the server
 
 ```bash
@@ -91,6 +95,13 @@ Server will be available at http://127.0.0.1:5001
 - `POST /api/projects` — Create a new project
 - `GET /api/projects` — List all projects
 - `GET /api/project-info?project=slug` — Get project metadata
+
+### Authentication
+- `POST /api/auth/login` — Start an authorized researcher session
+- `POST /api/auth/logout` — End the current session
+- `GET /api/auth/me` — Return the current account and CSRF token
+- `POST /api/auth/change-password` — Replace the current password
+- `GET/POST/PUT /api/admin/users` — Administrator-managed accounts and project access
 
 ### CSV Data
 - `POST /api/upload-data` — Upload TikTok dataset CSV
