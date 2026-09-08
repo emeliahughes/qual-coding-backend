@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, current_app
 from models import db, Project, Coder, Result, ProjectFile
 from sqlalchemy.exc import IntegrityError
 from routes.utils import generate_codebook_json, generate_results_csv, get_results_csv_text
@@ -8,14 +8,18 @@ import os, json, csv
 project_bp = Blueprint('project', __name__)
 
 def load_video_list(project):
-    folder = os.path.join("uploads", project.slug)
+    UPLOAD_ROOT = os.environ.get(
+        "UPLOAD_ROOT",
+        "/var/www/qual-coder/qual-coding-backend/uploads"
+    )
+    folder = os.path.join(UPLOAD_ROOT, project.slug)
     videos = []
     seen = set()
     if os.path.isdir(folder):
         for f in os.listdir(folder):
             path = os.path.join(folder, f)
             if path.endswith(".csv"):
-                with open(path, newline='', encoding='utf-8') as csvfile:
+                with open(path, newline='', encoding='utf-8', errors='replace') as csvfile:
                     reader = csv.DictReader(csvfile)
                     for row in reader:
                         vid = row.get("id") or row.get("video_id")
@@ -30,7 +34,7 @@ def refresh_video_count(project):
     db.session.commit()
     return videos
 
-@project_bp.route("/api/projects", methods=["POST"])
+@project_bp.route("/projects", methods=["POST"])
 def create_project():
     data = request.get_json()
     name = data.get("name")
@@ -66,25 +70,20 @@ def create_project():
     }
     return jsonify(result)
 
-@project_bp.route("/api/projects", methods=["GET"])
+@project_bp.route("/projects", methods=["GET"])
 def list_projects():
     projects = Project.query.all()
     result = []
     for p in projects:
-        # Calculate video count from actual results in database
-        unique_videos = set()
-        for coder in p.coders:
-            for db_result in coder.results:
-                unique_videos.add(db_result.video_id)
-        
-        # If we have results but no video_count, use the count from results
-        if unique_videos and p.video_count == 0:
-            p.video_count = len(unique_videos)
-            db.session.commit()
-        elif not unique_videos:
-            # If no results exist, always refresh from CSV files to get accurate count
+        try:
+            # Always refresh video count from CSV files to get accurate total count
+            # This ensures we show the total dataset size, not just processed videos
             refresh_video_count(p)
-        
+        except Exception as e:
+            current_app.logger.warning(
+                "Skipping project %s when listing: %s", p.slug, e, exc_info=True
+            )
+            # Use existing video_count so the project still appears in the list
         coders = [c.name for c in p.coders]
         responses = {}
         for c in p.coders:
@@ -95,11 +94,11 @@ def list_projects():
                     responses[c.name].append({"video_id": r.video_id, "excluded": True})
                 else:
                     responses[c.name].append({
-                        "video_id": r.video_id, 
+                        "video_id": r.video_id,
                         "status": r.status,
                         "excluded": False
                     })
-        file_names = [f.filename for f in p.project_files]
+        file_names = [f.original_name for f in p.project_files]
         result.append({
             "name": p.name,
             "slug": p.slug,
@@ -188,7 +187,7 @@ def update_results_for_codebook_changes(project, old_codebook, new_codebook):
         print(f"Error updating results for codebook changes: {e}")
         return 0
 
-@project_bp.route("/api/project/<slug>", methods=["PUT"])
+@project_bp.route("/project/<slug>", methods=["PUT"])
 def update_project(slug):
     project = Project.query.filter_by(slug=slug).first()
     if not project:
@@ -231,31 +230,62 @@ def update_project(slug):
     }
     return jsonify(result)
 
-@project_bp.route("/api/project/<slug>", methods=["DELETE"])
+import shutil
+from sqlalchemy.exc import IntegrityError
+
+@project_bp.route("/project/<slug>", methods=["DELETE"])
 def delete_project(slug):
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
-    db.session.delete(project)
-    db.session.commit()
-    return jsonify({"success": True})
 
-@project_bp.route("/api/project-info", methods=["GET"])
+    # remove files on disk (if you keep per-project files)
+    try:
+        base = os.environ.get("UPLOAD_ROOT", "/var/www/qual-coder/qual-coding-backend/uploads")
+        proj_dir = os.path.join(base, project.slug)
+        if os.path.isdir(proj_dir):
+            shutil.rmtree(proj_dir)
+    except Exception as e:
+        current_app.logger.exception("Failed to remove project dir")
+        return jsonify(error="Failed to remove project files", detail=str(e)), 500
+
+    try:
+        Result.query.filter_by(project_id=project.id).delete(synchronize_session=False)
+        Coder.query.filter_by(project_id=project.id).delete(synchronize_session=False)
+        ProjectFile.query.filter_by(project_id=project.id).delete(synchronize_session=False)
+        db.session.delete(project)
+        db.session.commit()
+        return jsonify({"success": True}), 200
+    except IntegrityError as e:
+        db.session.rollback()
+        return jsonify(error="DB constraint blocked delete", detail=str(e.orig)), 409
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("Delete failed")
+        return jsonify(error="Server error during delete", detail=str(e)), 500
+
+
+@project_bp.route("/project-info", methods=["GET"])
 def project_info():
     slug = request.args.get("project")
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return jsonify({"error": "Not found"}), 404
     coders = [c.name for c in project.coders]
+    file_names = [f.original_name for f in project.project_files]
     return jsonify({
         "name": project.name,
         "slug": slug,
         "coders": coders,
-        "codebook": json.loads(project.codebook or "[]")
+        "codebook": json.loads(project.codebook or "[]"),
+        "project_files": file_names
     })
 
+from werkzeug.utils import secure_filename
 
-@project_bp.route("/api/upload-data", methods=["POST"])
+UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", "/var/www/qual-coder/qual-coding-backend/uploads")
+
+@project_bp.route("/upload-data", methods=["POST"])
 def upload_data():
     file = request.files.get("file")
     slug = request.form.get("project")
@@ -266,38 +296,53 @@ def upload_data():
     if not project:
         return jsonify({"error": "Project not found"}), 404
 
-    upload_folder = os.path.join("uploads", slug)
-    os.makedirs(upload_folder, exist_ok=True)
+    upload_folder = os.path.join(UPLOAD_ROOT, slug)
+    try:
+        os.makedirs(upload_folder, exist_ok=True)
+        # sanity: ensure writable
+        with open(os.path.join(upload_folder, ".writetest"), "w") as _:
+            pass
+        os.remove(os.path.join(upload_folder, ".writetest"))
+    except Exception as e:
+        current_app.logger.exception("Upload dir not writable")
+        return jsonify(error="Upload dir not writable", dir=upload_folder, detail=str(e)), 500
 
-    original_filename = secure_filename(file.filename)
-    base_filename = project.name.replace(" ", "_")
-    ext = os.path.splitext(original_filename)[1] or ".csv"
+    original = secure_filename(file.filename or "")
+    base = secure_filename(project.name.replace(" ", "_")) or "upload"
+    ext = os.path.splitext(original)[1].lower() or ".csv"
+
     i = 1
-    new_filename = f"{base_filename}{ext}"
-    filepath = os.path.join(upload_folder, new_filename)
+    new_name = f"{base}{ext}"
+    filepath = os.path.join(upload_folder, new_name)
     while os.path.exists(filepath):
-        new_filename = f"{base_filename}_{i}{ext}"
-        filepath = os.path.join(upload_folder, new_filename)
+        new_name = f"{base}_{i}{ext}"
+        filepath = os.path.join(upload_folder, new_name)
         i += 1
 
-    file.save(filepath)
+    try:
+        file.save(filepath)
+    except Exception as e:
+        current_app.logger.exception("Saving upload failed")
+        return jsonify(error="Failed to save file", detail=str(e)), 500
 
-    # Save metadata about the uploaded file
-    pf = ProjectFile(project_id=project.id, filename=new_filename, original_name=original_filename)
-    db.session.add(pf)
-    db.session.commit()
+    try:
+        pf = ProjectFile(project_id=project.id, filename=new_name, original_name=original)
+        db.session.add(pf); db.session.commit()
+        refresh_video_count(project)  # updates project.video_count
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("Ingest/DB update failed")
+        return jsonify(error="Failed to record upload", detail=str(e)), 500
 
-    # ✅ Recalculate and store accurate video count
-    refresh_video_count(project)
+    return jsonify({"success": True, "filename": new_name}), 201
 
-    return jsonify({"success": True, "filename": new_filename})
 
-@project_bp.route("/api/download-codebook", methods=["GET"])
+@project_bp.route("/download-codebook", methods=["GET"])
 def download_codebook():
     slug = request.args.get("project")
     return generate_codebook_json(slug)
 
-@project_bp.route("/api/download-results", methods=["GET"])
+@project_bp.route("/download-results", methods=["GET"])
 def download_results():
     slug = request.args.get("project")
     format_type = request.args.get("format", "download")
@@ -310,18 +355,32 @@ def download_results():
     else:
         return generate_results_csv(slug)
 
-@project_bp.route("/api/coder", methods=["POST"])
+@project_bp.route("/coder", methods=["POST"])
 def add_coder():
     data = request.get_json()
     project = Project.query.filter_by(slug=data.get("project")).first()
     if not project:
         return jsonify({"error": "Project not found"}), 404
-    new = Coder(name=data["coder"], project_id=project.id)
-    db.session.add(new)
-    db.session.commit()
-    return jsonify({"success": True})
+    
+    coder_name = data.get("coder", "").strip()
+    if not coder_name:
+        return jsonify({"error": "Coder name is required"}), 400
+    
+    # Check if coder already exists
+    existing_coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
+    if existing_coder:
+        return jsonify({"error": "Coder already exists"}), 409
+    
+    try:
+        new = Coder(name=coder_name, project_id=project.id)
+        db.session.add(new)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to add coder"}), 500
 
-@project_bp.route("/api/coder", methods=["PUT"])
+@project_bp.route("/coder", methods=["PUT"])
 def rename_coder():
     data = request.get_json()
     project = Project.query.filter_by(slug=data.get("project")).first()
@@ -332,11 +391,25 @@ def rename_coder():
     db.session.commit()
     return jsonify({"success": True})
 
-@project_bp.route("/api/coder", methods=["DELETE"])
+@project_bp.route("/coder", methods=["DELETE"])
 def delete_coder():
     data = request.get_json()
     project = Project.query.filter_by(slug=data.get("project")).first()
-    coder = Coder.query.filter_by(name=data.get("coder"), project_id=project.id).first()
-    db.session.delete(coder)
-    db.session.commit()
-    return jsonify({"success": True})
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    
+    coder_name = data.get("coder", "").strip()
+    if not coder_name:
+        return jsonify({"error": "Coder name is required"}), 400
+    
+    coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
+    if not coder:
+        return jsonify({"error": "Coder not found"}), 404
+    
+    try:
+        db.session.delete(coder)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to delete coder"}), 500

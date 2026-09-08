@@ -25,9 +25,12 @@ def generate_results_csv(slug):
     if not project:
         return jsonify({"error": "Project not found"}), 404
 
-    results = Result.query.filter_by(project_id=project.id).all()
+    # Only include submitted results (submitted status or excluded videos)
+    results = Result.query.filter_by(project_id=project.id).filter(
+        (Result.status == "submitted") | (Result.excluded == True)
+    ).all()
     if not results:
-        return jsonify({"error": "No results found"}), 404
+        return jsonify({"error": "No submitted results found"}), 404
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -76,12 +79,15 @@ def generate_results_csv(slug):
     )
 
 def get_results_csv_text(slug):
-    """Get results CSV as text for the Results page"""
+    """Get results CSV as text for the Results page - only submitted results"""
     project = Project.query.filter_by(slug=slug).first()
     if not project:
         return None
 
-    results = Result.query.filter_by(project_id=project.id).all()
+    # Only include submitted results (submitted status or excluded videos)
+    results = Result.query.filter_by(project_id=project.id).filter(
+        (Result.status == "submitted") | (Result.excluded == True)
+    ).all()
     if not results:
         return None
 

@@ -7,8 +7,13 @@ import csv
 
 coding_bp = Blueprint('coding', __name__)
 
+UPLOAD_ROOT = os.environ.get(
+    "UPLOAD_ROOT",
+    "/var/www/qual-coder/qual-coding-backend/uploads"
+)
+
 def load_video_list(project):
-    folder = os.path.join("uploads", project.slug)
+    folder = os.path.join(UPLOAD_ROOT, project.slug)
     videos = []
     seen = set()
     if os.path.isdir(folder):
@@ -25,10 +30,22 @@ def load_video_list(project):
     return videos
 
 def extract_metadata(row):
+    # Convert Unix timestamp to human-readable format
+    create_time_raw = row.get("createTime")
+    create_time = None
+    if create_time_raw:
+        try:
+            # Convert Unix timestamp to readable date
+            from datetime import datetime
+            timestamp = int(create_time_raw)
+            create_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            create_time = create_time_raw  # Fallback to original value
+    
     return {
         "author": row.get("author_name") or row.get("author_nickName"),
         "description": row.get("text"),
-        "create_time": row.get("createTime"),
+        "create_time": create_time,
         "view_count": safe_int(row.get("playCount")),
         "like_count": safe_int(row.get("diggCount")),
         "share_count": safe_int(row.get("shareCount")),
@@ -42,11 +59,12 @@ def safe_int(value):
     except (ValueError, TypeError):
         return 0
 
-@coding_bp.route("/api/video-at-index")
+@coding_bp.route("/video-at-index")
 def video_at_index():
     slug = request.args.get("project")
     coder_name = request.args.get("coder")
     index_param = request.args.get("index")
+    filter_type = request.args.get("filter", "all")
 
     project = Project.query.filter_by(slug=slug).first()
     if not project:
@@ -57,6 +75,46 @@ def video_at_index():
         return jsonify({"error": "Coder not found"}), 404
 
     videos = load_video_list(project)
+    
+    # Apply filtering based on coder's progress
+    print(f"DEBUG: filter_type={filter_type}, coder={coder}, coder_name={coder_name}")
+    if filter_type != "all":
+        filtered_videos = []
+        for i, video in enumerate(videos):
+            video_id = video.get("id") or video.get("video_id")
+            result = None
+            if coder:
+                result = Result.query.filter_by(
+                    project_id=project.id,
+                    coder_id=coder.id,
+                    video_id=video_id
+                ).first()
+            
+            if filter_type == "uncoded" and not result:
+                filtered_videos.append((i, video))
+            elif filter_type == "saved" and result and result.status == "draft":
+                filtered_videos.append((i, video))
+            elif filter_type == "submitted" and result and result.status == "submitted":
+                filtered_videos.append((i, video))
+            elif filter_type == "excluded" and result and result.excluded:
+                filtered_videos.append((i, video))
+        
+        # Return filtered video list with original indices
+        processed_videos = []
+        for orig_idx, video in filtered_videos:
+            video_id = video.get("id") or video.get("video_id")
+            processed_video = {
+                "id": video_id,
+                "metadata": extract_metadata(video),
+                "index": orig_idx
+            }
+            processed_videos.append({"original_index": orig_idx, "video": processed_video})
+        
+        return jsonify({
+            "filtered_videos": processed_videos,
+            "total": len(filtered_videos)
+        })
+    
     total_videos = len(videos)
 
     if index_param is not None:
@@ -85,7 +143,9 @@ def video_at_index():
         ).first()
         response_data = {
             "categories": json.loads(result.categories) if result and result.categories else {},
-            "notes": result.notes if result else ""
+            "notes": result.notes if result else "",
+            "status": result.status if result else "draft",
+            "excluded": result.excluded if result else False
         }
 
     return jsonify({
@@ -97,7 +157,7 @@ def video_at_index():
     })
 
 
-@coding_bp.route("/api/save-progress", methods=["POST"])
+@coding_bp.route("/save-progress", methods=["POST"])
 def save_progress():
     data = request.get_json()
     slug = data.get("project")
@@ -138,16 +198,23 @@ def save_progress():
         )
         db.session.add(result)
     else:
+        # Preserve submitted status - autosave should not revert submitted work back to draft
+        # Only update status to draft if it's not already submitted
+        if result.status != "submitted":
+            result.status = "draft"
         result.categories = json.dumps(categories) if not excluded else json.dumps({})
         result.notes = notes
         result.excluded = excluded
         result.timestamp = datetime.utcnow()
-        result.status = "draft"
 
     db.session.commit()
-    return jsonify({"success": True})
+    # Return the final status so frontend can track it
+    return jsonify({
+        "success": True,
+        "status": result.status
+    })
 
-@coding_bp.route("/api/submit", methods=["POST"])
+@coding_bp.route("/submit", methods=["POST"])
 def submit():
     data = request.get_json()
     slug = data.get("project")
@@ -163,36 +230,53 @@ def submit():
     # For excluded videos, categories is not required
     if not excluded and not categories:
         return jsonify({"error": "Missing categories for non-excluded video"}), 400
+    # Require at least one tag selected for non-excluded videos (reject e.g. {"Style": [], "Color": []})
+    if not excluded and not any(tags for tags in (categories or {}).values()):
+        return jsonify({"error": "At least one tag must be selected, or the video must be marked as excluded."}), 400
 
     project = Project.query.filter_by(slug=slug).first()
     coder = Coder.query.filter_by(name=coder_name, project_id=project.id).first()
     if not project or not coder:
         return jsonify({"error": "Project or Coder not found"}), 404
 
-    Result.query.filter_by(
+    # Update existing record instead of delete+create to avoid race conditions
+    result = Result.query.filter_by(
         project_id=project.id,
         coder_id=coder.id,
         video_id=video_id
-    ).delete()
+    ).first()
 
-    result = Result(
-        project_id=project.id,
-        coder_id=coder.id,
-        video_id=video_id,
-        categories=json.dumps(categories) if not excluded else json.dumps({}),
-        notes=notes,
-        status="submitted",
-        excluded=excluded,
-        timestamp=datetime.utcnow()
-    )
-    db.session.add(result)
+    if not result:
+        # Create new record if it doesn't exist
+        result = Result(
+            project_id=project.id,
+            coder_id=coder.id,
+            video_id=video_id,
+            categories=json.dumps(categories) if not excluded else json.dumps({}),
+            notes=notes,
+            status="submitted",
+            excluded=excluded,
+            timestamp=datetime.utcnow()
+        )
+        db.session.add(result)
+    else:
+        # Update existing record - set status to submitted
+        result.categories = json.dumps(categories) if not excluded else json.dumps({})
+        result.notes = notes
+        result.status = "submitted"
+        result.excluded = excluded
+        result.timestamp = datetime.utcnow()
 
     coder.progress_index += 1
     db.session.commit()
 
-    return jsonify({"success": True})
+    # Return status so frontend can immediately update state
+    return jsonify({
+        "success": True,
+        "status": result.status
+    })
 
-@coding_bp.route("/api/codebook", methods=["POST"])
+@coding_bp.route("/codebook", methods=["POST"])
 def update_codebook():
     data = request.get_json()
     slug = data.get("project")
@@ -214,11 +298,11 @@ def update_codebook():
     existing = next((c for c in codebook if c.get("category") == category), None)
 
     if not existing:
-        new_entry = {"category": category, "tags": [tag] if tag else []}
+        new_entry = {"category": category, "tags": [{"tag": tag, "description": ""}] if tag else []}
         codebook.append(new_entry)
     else:
-        if tag and tag not in existing["tags"]:
-            existing["tags"].append(tag)
+        if tag and not any(t.get("tag") == tag for t in existing["tags"] if isinstance(t, dict)):
+            existing["tags"].append({"tag": tag, "description": ""})
 
     project.codebook = json.dumps(codebook)
     db.session.commit()
